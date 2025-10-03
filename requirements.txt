@@ -1,0 +1,6 @@
+deepface==0.0.95
+tf-keras==2.20.1
+# Optional (Apple Silicon acceleration):
+# tensorflow-macos==2.20.0
+# tensorflow-metal==1.1.0
+
