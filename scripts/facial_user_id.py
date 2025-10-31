@@ -20,7 +20,7 @@ from deepface import DeepFace
 
 def compute_face_embedding(image_path: Path, model_name: str) -> list[float]:
     """
-    Compute a face embedding for the given image using a specified model.
+    Compute a face embedding for the given image using the chosen model.
 
     Returns the embedding as a list of floats. Raises SystemExit on errors.
     """
@@ -28,7 +28,7 @@ def compute_face_embedding(image_path: Path, model_name: str) -> list[float]:
         representations = DeepFace.represent(
             img_path=str(image_path),
             model_name=model_name,
-            detector_backend="retinaface",
+            detector_backend="opencv",  # Optimized for Jetson
             enforce_detection=True,
         )
     except Exception as error:  # noqa: BLE001

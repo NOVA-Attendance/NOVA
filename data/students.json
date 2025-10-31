@@ -1,0 +1,32 @@
+[
+  {
+    "student_id": "300299663",
+    "label": "student_300299663",
+    "images_dir": "data/images/300299663"
+  },
+  {
+    "student_id": "300111222",
+    "label": "student_300111222",
+    "images_dir": "data/images/300111222"
+  },
+  {
+    "student_id": "300333111",
+    "label": "student_300333111",
+    "images_dir": "data/images/300333111"
+  }
+  ,
+  {
+    "student_id": "jeff_bezos_demo",
+    "label": "student_jeff_bezos_demo",
+    "images_dir": "data/images/jeff_bezos_demo"
+  }
+]
+
+
+
+
+
+
+
+
+
