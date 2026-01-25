@@ -79,14 +79,47 @@ def init():
 
     logger.info("System initialization started.")
 
-    # Check for root/sudo
+    # 1. Check Root Permissions
     if os.getuid() != 0 and os.geteuid() != 0:
         logger.error("Insufficient permissions: program must be run as root or with sudo.")
         sys.exit(1)
+    logger.debug("INIT: Root permissions confirmed.")
 
-    # Try to import RFID library
+    # 2. Check for GStreamer tools
+    try:
+        subprocess.run(
+            ["gst-launch-1.0", "--version"], 
+            stdout=subprocess.DEVNULL, 
+            stderr=subprocess.DEVNULL, 
+            check=True
+        )
+        logger.debug("INIT: GStreamer tools found.")
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        logger.error("Missing dependency: 'gst-launch-1.0' not found. Install with: sudo apt install gstreamer1.0-tools")
+        sys.exit(1)
+
+    # 3. Check if Camera Device Exists
+    if not os.path.exists("/dev/video0"):
+        logger.error("Hardware Error: Camera device '/dev/video0' not found. Check ribbon cable connection.")
+        sys.exit(1)
+    logger.debug("INIT: Camera device (/dev/video0) detected.")
+
+    # 4. Check if nvargus-daemon is running
+    try:
+        status = subprocess.call(["systemctl", "is-active", "--quiet", "nvargus-daemon"])
+        if status != 0:
+            logger.warning("Camera Service Issue: 'nvargus-daemon' is not active. Attempting to restart...")
+            subprocess.run(["systemctl", "restart", "nvargus-daemon"], check=True)
+            sleep(2)
+            logger.info("Camera service restarted successfully.")
+        logger.debug("INIT: nvargus-daemon service is active.")
+    except Exception as e:
+        logger.warning(f"Could not check/restart nvargus-daemon: {e}")
+
+    # 5. Check RFID Library
     try:
         from Jetson_MFRC522 import SimpleMFRC522
+        logger.debug("INIT: RFID library imported successfully.")
     except ModuleNotFoundError as e:
         logger.error(f"RFID library not found: {e}")
         sys.exit(1)
@@ -94,10 +127,10 @@ def init():
         logger.error(f"Unexpected error importing RFID library: {e}")
         sys.exit(1)
 
-    # Initialize RFID reader
+    # 6. Initialize RFID Reader
     try:
         reader = SimpleMFRC522()
-        logger.info("RFID reader initialized successfully.")
+        logger.debug("INIT: RFID reader initialized successfully.")
     except FileNotFoundError as e:
         logger.error(f"RFID reader initialization failed: {e}\nEnsure spidev driver is loaded.")
         sys.exit(1)
@@ -105,38 +138,16 @@ def init():
         logger.error(f"Unexpected error initializing RFID reader: {e}")
         sys.exit(1)
 
-    # Check server connectivity
+    # 7. Check Server Connectivity
     try:
         response = requests.get(SERVER_URL, timeout=5)
-        logger.debug(response)
         if response.status_code == 200:
-            logger.info("Connected to server successfully.")
+            logger.debug("INIT: Server connection established.")
         else:
             logger.warning(f"Server returned status {response.status_code}. Entering offline mode.")
             OFFLINE_MODE = True
     except requests.RequestException:
         logger.warning("Unable to reach server. Entering offline mode.")
-        OFFLINE_MODE = True
-
-def send_attendance(id_value):
-    global OFFLINE_MODE
-    if OFFLINE_MODE:
-        logger.info(f"Offline mode: recorded attendance locally for ID {id_value}")
-        return
-
-    try:
-        response = requests.post(
-            SERVER_URL,
-            json={"id": id_value},
-            timeout=5
-        )
-        if response.status_code == 200:
-            logger.info(f"Attendance recorded successfully for ID {id_value}")
-        else:
-            logger.warning(f"Server returned status {response.status_code}: {response.text}")
-    except requests.RequestException as e:
-        logger.error(f"Failed to send attendance: {e}")
-        logger.warning("Switching to offline mode.")
         OFFLINE_MODE = True
 
 def main():
