@@ -150,6 +150,27 @@ def init():
         logger.warning("Unable to reach server. Entering offline mode.")
         OFFLINE_MODE = True
 
+def send_attendance(id_value):
+    global OFFLINE_MODE
+    if OFFLINE_MODE:
+        logger.info(f"Offline mode: recorded attendance locally for ID {id_value}")
+        return
+
+    try:
+        response = requests.post(
+            SERVER_URL,
+            json={"id": id_value},
+            timeout=5
+        )
+        if response.status_code == 200:
+            logger.info(f"Attendance recorded successfully for ID {id_value}")
+        else:
+            logger.warning(f"Server returned status {response.status_code}: {response.text}")
+    except requests.RequestException as e:
+        logger.error(f"Failed to send attendance: {e}")
+        logger.warning("Switching to offline mode.")
+        OFFLINE_MODE = True
+
 def main():
     init()
     try:
