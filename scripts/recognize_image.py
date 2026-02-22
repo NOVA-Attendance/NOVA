@@ -98,6 +98,54 @@ def find_best_match(query_embedding: np.ndarray, database_embeddings: np.ndarray
     }
 
 
+def compare_against_embedding(
+    image_path: Path,
+    reference_embedding,
+    model_name: str = "Facenet512",
+    threshold: float = 0.4,
+    metric: str = "cos",
+) -> Dict:
+    """Compare a captured image against a single pre-fetched embedding from the server.
+
+    Skips loading the local face database entirely. Returns a dict with confidence,
+    distance, matched, and an error key if recognition fails.
+    """
+    base: Dict = {
+        "image_path": str(image_path),
+        "model":      model_name,
+        "metric":     metric,
+        "threshold":  threshold,
+    }
+    try:
+        ref = np.array(reference_embedding, dtype=np.float32)
+        if ref.ndim != 1 or ref.size == 0:
+            raise ValueError(f"Invalid reference embedding shape: {ref.shape}")
+
+        query = compute_embedding(image_path, model_name)
+
+        if metric == "cos":
+            distance   = cosine_distance(query, ref)
+            confidence = max(0.0, 1.0 - distance)
+        else:
+            distance   = l2_distance(query, ref)
+            confidence = max(0.0, 1.0 / (1.0 + distance))
+
+        return {
+            **base,
+            "distance":   round(distance, 6),
+            "confidence": round(confidence, 6),
+            "matched":    confidence >= threshold,
+        }
+    except Exception as exc:
+        return {
+            **base,
+            "distance":   1.0,
+            "confidence": 0.0,
+            "matched":    False,
+            "error":      str(exc),
+        }
+
+
 def recognize_single_image(image_path: Path, model_name: str, threshold: float = 0.4, 
                          metric: str = "cos") -> Dict:
     """Compare one image against the DB and mark recognized if >= threshold."""
