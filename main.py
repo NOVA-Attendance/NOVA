@@ -75,7 +75,7 @@ def capture_image(rfid_tag: str, timestamp: datetime) -> Path:
     SCAN_DIR.mkdir(exist_ok=True)
     safe_tag = rfid_tag.replace("/", "_").replace("\\", "_")
     out_path = SCAN_DIR / f"{timestamp.strftime('%Y%m%d_%H%M%S_%f')}_{safe_tag}.jpg"
-    out_path.unlink(missing_ok=True)
+    # out_path.unlink(missing_ok=True)
 
     cmd = [
         "gst-launch-1.0",
@@ -153,7 +153,7 @@ def process_task(task: ScanTask):
         student = api_client.get_rfid_face_embedding(task.rfid_tag)
         if student is None:
             logger.warning(f"RFID {task.rfid_tag} not found on server. Skipping recognition.")
-            task.image_path.unlink(missing_ok=True)
+            # task.image_path.unlink(missing_ok=True)
             return
 
     server_embedding = student.get("face_embedding") if student else None
