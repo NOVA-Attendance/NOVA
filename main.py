@@ -121,7 +121,7 @@ def flush_offline_queue():
     for line in lines:
         try:
             rec = json.loads(line)
-            ok = api_client.post_face_result(
+            ok = api_client.post_attendance_face_verify(
                 rfid_tag   = rec["rfid_tag"],
                 student_id = rec["student_id"],
                 class_id   = rec["class_id"],
@@ -146,12 +146,9 @@ def process_task(task: ScanTask):
     """Process a single scan task on the worker thread."""
     logger.info(f"Processing scan - RFID: {task.rfid_tag}")
 
-    # Notify the dashboard via the existing tap endpoint
-    api_client.rfid_scan(task.rfid_tag)
-
     student = None
     if not offline_mode.is_set():
-        student = api_client.get_student_by_rfid(task.rfid_tag)
+        student = api_client.get_rfid_face_embedding(task.rfid_tag)
         if student is None:
             logger.warning(f"RFID {task.rfid_tag} not found on server. Skipping recognition.")
             task.image_path.unlink(missing_ok=True)
@@ -179,7 +176,7 @@ def process_task(task: ScanTask):
         logger.warning(f"Face recognition error: {result['error']}")
 
     confidence = result.get("confidence", 0.0)
-    matched    = result.get("matched", False)
+    matched    = result.get("matched", result.get("recognized", False))
     student_id = (student or {}).get("student_id") or result.get("student_id")
 
     logger.info(f"Result - student: {student_id} | confidence: {confidence:.2%} | matched: {matched}")
@@ -195,8 +192,11 @@ def process_task(task: ScanTask):
 
     if offline_mode.is_set():
         save_offline_record(record)
+    elif student_id is None:
+        logger.warning("No student_id resolved; skipping server POST.")
+        save_offline_record(record)
     else:
-        ok = api_client.post_face_result(**record)
+        ok = api_client.post_attendance_face_verify(**record)
         if not ok:
             save_offline_record(record)
         else:

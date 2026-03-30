@@ -13,6 +13,7 @@ Usage:
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import List, Dict, Tuple
 
@@ -35,7 +36,25 @@ def compute_embedding(image_path: Path, model_name: str) -> np.ndarray:
         embedding = rep.get("embedding") if isinstance(rep, dict) else rep
         if not embedding:
             raise RuntimeError("No face detected in image")
-        return np.array(embedding, dtype=np.float32)
+        emb = np.array(embedding, dtype=np.float32)
+
+        # Debug: optionally print the embedding vector for troubleshooting.
+        # Enable with:
+        #   export NOVA_DEBUG_EMBEDDING=1
+        #   (optional) export NOVA_DEBUG_EMBEDDING_FULL=1  # prints entire vector
+        if os.getenv("NOVA_DEBUG_EMBEDDING", "0") == "1":
+            full = os.getenv("NOVA_DEBUG_EMBEDDING_FULL", "0") == "1"
+            if full:
+                print(f"[DEBUG] embedding({model_name})={emb.tolist()}")
+            else:
+                head = emb[:10].tolist()
+                tail = emb[-10:].tolist() if emb.size > 10 else []
+                print(
+                    f"[DEBUG] embedding({model_name}) len={emb.size} "
+                    f"head10={head} tail10={tail}"
+                )
+
+        return emb
     except Exception as e:
         raise RuntimeError(f"Failed to compute embedding: {e}")
 

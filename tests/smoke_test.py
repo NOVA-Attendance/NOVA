@@ -31,8 +31,8 @@ def run(args):
         print("  Server unreachable. Is the Flask app running?")
         sys.exit(1)
 
-    print(f"\nStep 2: GET /students/rfid/{args.rfid_tag}")
-    student = api_client.get_student_by_rfid(args.rfid_tag)
+    print(f"\nStep 2: GET /rfid/face-embedding?rfid_id={args.rfid_tag}")
+    student = api_client.get_rfid_face_embedding(args.rfid_tag)
     if student:
         print(f"  Student found: {student.get('name')} (id={student.get('student_id')})")
         embedding = student.get("face_embedding")
@@ -67,7 +67,7 @@ def run(args):
 
     student_id = (student or {}).get("student_id", args.rfid_tag)
     print(f"\nStep 4: POST /attendance/face-verify")
-    ok = api_client.post_face_result(
+    ok = api_client.post_attendance_face_verify(
         rfid_tag   = args.rfid_tag,
         student_id = student_id,
         class_id   = args.class_id,
