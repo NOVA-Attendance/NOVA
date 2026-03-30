@@ -32,10 +32,12 @@ try:
     import api_client
     from recognize_image import compare_against_embedding, recognize_single_image
 except ImportError as e:
-    print(f"Error importing required scripts: {e}")
+    # Avoid UnicodeEncodeError on Jetson terminals when the underlying
+    # ImportError message contains broken byte sequences.
+    print("Error importing required scripts:", repr(e))
     sys.exit(1)
 
-SERVER_URL   = "http://192.168.0.100:5001"
+SERVER_URL   = "http://192.168.0.164:5001"
 CLASS_ID     = 1
 MODEL_NAME   = "Facenet512"
 THRESHOLD    = 0.4
@@ -138,7 +140,7 @@ def flush_offline_queue():
     if remaining:
         OFFLINE_LOG.write_text("\n".join(remaining) + "\n")
     else:
-        OFFLINE_LOG.unlink(missing_ok=True)
+        # OFFLINE_LOG.unlink(missing_ok=True)
         logger.info("Offline queue fully flushed.")
 
 
@@ -202,7 +204,7 @@ def process_task(task: ScanTask):
         else:
             flush_offline_queue()
 
-    task.image_path.unlink(missing_ok=True)
+    # task.image_path.unlink(missing_ok=True)
 
 
 def worker_thread_fn():
