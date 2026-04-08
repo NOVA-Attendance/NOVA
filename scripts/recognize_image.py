@@ -25,18 +25,31 @@ import cv2
 def compute_embedding(image_path: Path, model_name: str) -> np.ndarray:
     """Compute a face embedding for one image using the selected model."""
     try:
-        # Universal optimization: opencv detector is fastest across all platforms
-        reps = DeepFace.represent(
-            img_path=str(image_path),
-            model_name=model_name,
-            detector_backend="opencv",  # 3-5x faster than retinaface on all devices
-            enforce_detection=True,
-        )
-        rep = reps[0] if isinstance(reps, list) and reps else reps
-        embedding = rep.get("embedding") if isinstance(rep, dict) else rep
-        if not embedding:
-            raise RuntimeError("No face detected in image")
-        emb = np.array(embedding, dtype=np.float32)
+        # Try several detectors. Jetson scans can be low-light or motion-blurred,
+        # and different backends succeed on different frames.
+        detectors = ("opencv", "mtcnn", "retinaface", "ssd")
+        last_err = None
+        emb = None
+
+        for backend in detectors:
+            try:
+                reps = DeepFace.represent(
+                    img_path=str(image_path),
+                    model_name=model_name,
+                    detector_backend=backend,
+                    enforce_detection=False,
+                )
+                rep = reps[0] if isinstance(reps, list) and reps else reps
+                embedding = rep.get("embedding") if isinstance(rep, dict) else rep
+                if embedding:
+                    emb = np.array(embedding, dtype=np.float32)
+                    break
+            except Exception as e:
+                last_err = e
+                continue
+
+        if emb is None or emb.size == 0:
+            raise RuntimeError(f"No face detected in image ({last_err})")
 
         # Debug: optionally print the embedding vector for troubleshooting.
         # Enable with:
