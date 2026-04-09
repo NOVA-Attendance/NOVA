@@ -344,6 +344,9 @@ def run_tui(event_queue: "queue.Queue[tuple]"):
             pass
 
     def _draw(stdscr):
+        # Full-screen redraw every time to overwrite any stray terminal output
+        # (some RFID libraries print "AUTH ERROR!" directly to the tty).
+        stdscr.clear()
         stdscr.erase()
         h, w = stdscr.getmaxyx()
 
@@ -357,9 +360,11 @@ def run_tui(event_queue: "queue.Queue[tuple]"):
         _safe_addstr(stdscr, 2, 0, f"Server: {online_txt}", online_attr)
         _safe_addstr(stdscr, 2, 18, f"Queue: {state['queue_depth']}", curses.color_pair(1))
 
-        status_attr = curses.color_pair(2) | curses.A_BOLD
+        status_attr = curses.color_pair(4) | curses.A_BOLD
         if state["error"]:
             status_attr = curses.color_pair(3) | curses.A_BOLD
+        elif state["status"].startswith("Waiting"):
+            status_attr = curses.color_pair(2) | curses.A_BOLD
         _safe_addstr(stdscr, 4, 0, f"Status: {state['status']}", status_attr)
         if state["detail"]:
             _safe_addstr(stdscr, 5, 0, state["detail"], curses.color_pair(1))
@@ -376,7 +381,12 @@ def run_tui(event_queue: "queue.Queue[tuple]"):
             warn = "Terminal too small - enlarge for full UI"
             _safe_addstr(stdscr, 1, 0, warn, curses.color_pair(3) | curses.A_BOLD)
 
-        stdscr.refresh()
+        try:
+            stdscr.redrawwin()
+        except Exception:
+            pass
+        stdscr.noutrefresh()
+        curses.doupdate()
 
     def _tui_main(stdscr):
         curses.curs_set(0)
@@ -396,11 +406,14 @@ def run_tui(event_queue: "queue.Queue[tuple]"):
 
         if curses.has_colors():
             curses.start_color()
-            curses.use_default_colors()
+            try:
+                curses.use_default_colors()
+            except Exception:
+                pass
             curses.init_pair(1, curses.COLOR_WHITE, -1)   # default
-            curses.init_pair(2, curses.COLOR_GREEN, -1)   # success/ready
+            curses.init_pair(2, curses.COLOR_GREEN, -1)   # ready
             curses.init_pair(3, curses.COLOR_RED, -1)     # error/offline
-            curses.init_pair(4, curses.COLOR_CYAN, -1)    # info
+            curses.init_pair(4, curses.COLOR_CYAN, -1)    # info/status
 
         state["status"] = "Waiting for RFID scan..."
         state["detail"] = "Tap your card on the reader."
@@ -431,22 +444,23 @@ def run_tui(event_queue: "queue.Queue[tuple]"):
                     state["last_image"] = None
                     state["error"] = None
                     state["status"] = "RFID scanned."
-                    state["detail"] = f"Capturing image for {tag}..."
+                    state["detail"] = f"Taking photo for {tag}..."
                     last_ready_at = time.monotonic()
                 elif kind == "image_captured":
                     _kind, tag, ts, img = ev
                     state["last_rfid"] = tag
                     state["last_image"] = img
                     state["error"] = None
-                    state["status"] = "Image captured."
-                    state["detail"] = "Queued for recognition/attendance."
+                    # User-visible "complete" happens after the photo finishes.
+                    state["status"] = "Scan complete."
+                    state["detail"] = "Photo captured. Preparing for next user..."
                     last_ready_at = time.monotonic()
                 elif kind == "task_queued":
                     _kind, tag, ts, qd = ev
                     state["queue_depth"] = int(qd)
                     state["error"] = None
-                    state["status"] = "Scan complete."
-                    state["detail"] = "Ready for next user..."
+                    # Keep UI stable; queueing is internal.
+                    state["status"] = state["status"] or "Scan complete."
                     last_ready_at = time.monotonic()
                 elif kind == "capture_failed":
                     _kind, tag, ts = ev
@@ -465,7 +479,7 @@ def run_tui(event_queue: "queue.Queue[tuple]"):
                 event_queue.task_done()
 
             # Auto-return to "waiting" after a brief success window.
-            if state["status"] in ("Scan complete.", "Image captured.", "RFID scanned.") and (time.monotonic() - last_ready_at) > 2.0:
+            if state["status"] in ("Scan complete.", "RFID scanned.") and (time.monotonic() - last_ready_at) > 2.0:
                 state["status"] = "Waiting for RFID scan..."
                 state["detail"] = "Tap your card on the reader."
                 state["error"] = None
@@ -473,6 +487,10 @@ def run_tui(event_queue: "queue.Queue[tuple]"):
             try:
                 ch = stdscr.getch()
                 if ch == curses.KEY_RESIZE:
+                    try:
+                        curses.update_lines_cols()
+                    except Exception:
+                        pass
                     drained = True
             except curses.error:
                 pass
