@@ -67,6 +67,13 @@ def setup_logging():
     return log
 
 
+def disable_console_logging(log: logging.Logger):
+    """Keep file logging, remove console output (for TUI)."""
+    for h in list(log.handlers):
+        if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler):
+            log.removeHandler(h)
+
+
 def capture_image(rfid_tag: str, timestamp: datetime) -> Path:
     """Capture one frame via GStreamer and save it to a unique path.
 
@@ -224,6 +231,192 @@ def worker_thread_fn():
     logger.info("Worker thread stopped.")
 
 
+def rfid_reader_thread_fn(event_queue: "queue.Queue[tuple]"):
+    """Blocking RFID read loop that emits UI events and enqueues scan tasks."""
+    logger.info("RFID reader thread started.")
+    while not shutdown_event.is_set():
+        try:
+            rfid_tag, _text = reader.read()
+            timestamp = datetime.now()
+            event_queue.put(("rfid_read", str(rfid_tag), timestamp))
+
+            image_path = capture_image(str(rfid_tag), timestamp)
+            if image_path is None:
+                logger.warning(f"Image capture failed for RFID {rfid_tag}, skipping.")
+                event_queue.put(("capture_failed", str(rfid_tag), timestamp))
+                continue
+
+            event_queue.put(("image_captured", str(rfid_tag), timestamp, str(image_path)))
+            task = ScanTask(rfid_tag=str(rfid_tag), image_path=image_path, timestamp=timestamp)
+            scan_queue.put(task)
+            event_queue.put(("task_queued", str(rfid_tag), timestamp, scan_queue.qsize()))
+        except Exception as e:
+            logger.error(f"Unexpected error in RFID reader loop: {e}", exc_info=True)
+            event_queue.put(("reader_error", repr(e), datetime.now()))
+            time.sleep(0.5)
+    logger.info("RFID reader thread stopped.")
+
+
+def run_tui(event_queue: "queue.Queue[tuple]"):
+    """Curses TUI that shows state and scales to terminal size."""
+    import curses
+
+    state = {
+        "status": "Initializing…",
+        "detail": "",
+        "last_rfid": None,
+        "last_image": None,
+        "last_event_at": datetime.now(),
+        "queue_depth": 0,
+        "offline": offline_mode.is_set(),
+        "error": None,
+    }
+
+    def _safe_addstr(stdscr, y, x, s, attr=0):
+        try:
+            h, w = stdscr.getmaxyx()
+            if y < 0 or y >= h or x >= w:
+                return
+            if x < 0:
+                s = s[-x:]
+                x = 0
+            if not s:
+                return
+            stdscr.addnstr(y, x, s, max(0, w - x - 1), attr)
+        except curses.error:
+            pass
+
+    def _draw(stdscr):
+        stdscr.erase()
+        h, w = stdscr.getmaxyx()
+
+        title = "NOVA Attendance (Jetson Edge)"
+        right = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        _safe_addstr(stdscr, 0, 0, title, curses.color_pair(1) | curses.A_BOLD)
+        _safe_addstr(stdscr, 0, max(0, w - len(right) - 1), right, curses.color_pair(1) | curses.A_BOLD)
+
+        online_txt = "OFFLINE" if state["offline"] else "ONLINE"
+        online_attr = curses.color_pair(3) | curses.A_BOLD if state["offline"] else curses.color_pair(2) | curses.A_BOLD
+        _safe_addstr(stdscr, 2, 0, f"Server: {online_txt}", online_attr)
+        _safe_addstr(stdscr, 2, 18, f"Queue: {state['queue_depth']}", curses.color_pair(1))
+
+        status_attr = curses.color_pair(2) | curses.A_BOLD
+        if state["error"]:
+            status_attr = curses.color_pair(3) | curses.A_BOLD
+        _safe_addstr(stdscr, 4, 0, f"Status: {state['status']}", status_attr)
+        if state["detail"]:
+            _safe_addstr(stdscr, 5, 0, state["detail"], curses.color_pair(1))
+
+        if state["last_rfid"]:
+            _safe_addstr(stdscr, 7, 0, f"Last RFID: {state['last_rfid']}", curses.color_pair(1))
+        if state["last_image"]:
+            _safe_addstr(stdscr, 8, 0, f"Last image: {state['last_image']}", curses.color_pair(1))
+
+        help_txt = "Ctrl+C to exit"
+        _safe_addstr(stdscr, h - 1, 0, help_txt, curses.color_pair(1))
+
+        if w < 50 or h < 10:
+            warn = "Terminal too small — enlarge for full UI"
+            _safe_addstr(stdscr, 1, 0, warn, curses.color_pair(3) | curses.A_BOLD)
+
+        stdscr.refresh()
+
+    def _tui_main(stdscr):
+        curses.curs_set(0)
+        stdscr.nodelay(True)
+        stdscr.timeout(200)
+
+        if curses.has_colors():
+            curses.start_color()
+            curses.use_default_colors()
+            curses.init_pair(1, curses.COLOR_WHITE, -1)   # default
+            curses.init_pair(2, curses.COLOR_GREEN, -1)   # success/ready
+            curses.init_pair(3, curses.COLOR_RED, -1)     # error/offline
+            curses.init_pair(4, curses.COLOR_CYAN, -1)    # info
+
+        state["status"] = "Waiting for RFID scan…"
+        state["detail"] = "Tap your card on the reader."
+        state["error"] = None
+        state["offline"] = offline_mode.is_set()
+        state["queue_depth"] = scan_queue.qsize()
+        _draw(stdscr)
+
+        last_ready_at = time.monotonic()
+        while not shutdown_event.is_set():
+            state["offline"] = offline_mode.is_set()
+            state["queue_depth"] = scan_queue.qsize()
+
+            # Consume as many events as available between draws.
+            drained = False
+            while True:
+                try:
+                    ev = event_queue.get_nowait()
+                except queue.Empty:
+                    break
+                drained = True
+                kind = ev[0]
+                state["last_event_at"] = datetime.now()
+
+                if kind == "rfid_read":
+                    _kind, tag, ts = ev
+                    state["last_rfid"] = tag
+                    state["last_image"] = None
+                    state["error"] = None
+                    state["status"] = "RFID scanned."
+                    state["detail"] = f"Capturing image for {tag}…"
+                    last_ready_at = time.monotonic()
+                elif kind == "image_captured":
+                    _kind, tag, ts, img = ev
+                    state["last_rfid"] = tag
+                    state["last_image"] = img
+                    state["error"] = None
+                    state["status"] = "Image captured."
+                    state["detail"] = "Queued for recognition/attendance."
+                    last_ready_at = time.monotonic()
+                elif kind == "task_queued":
+                    _kind, tag, ts, qd = ev
+                    state["queue_depth"] = int(qd)
+                    state["error"] = None
+                    state["status"] = "Scan complete."
+                    state["detail"] = "Ready for next user…"
+                    last_ready_at = time.monotonic()
+                elif kind == "capture_failed":
+                    _kind, tag, ts = ev
+                    state["error"] = "capture_failed"
+                    state["status"] = "Image capture failed."
+                    state["detail"] = "Please try scanning again."
+                    last_ready_at = time.monotonic()
+                elif kind == "reader_error":
+                    _kind, msg, ts = ev
+                    state["error"] = "reader_error"
+                    state["status"] = "RFID reader error."
+                    state["detail"] = msg
+                    last_ready_at = time.monotonic()
+
+                event_queue.task_done()
+
+            # Auto-return to "waiting" after a brief success window.
+            if state["status"] in ("Scan complete.", "Image captured.", "RFID scanned.") and (time.monotonic() - last_ready_at) > 2.0:
+                state["status"] = "Waiting for RFID scan…"
+                state["detail"] = "Tap your card on the reader."
+                state["error"] = None
+
+            try:
+                ch = stdscr.getch()
+                if ch == curses.KEY_RESIZE:
+                    drained = True
+            except curses.error:
+                pass
+
+            if drained:
+                _draw(stdscr)
+            else:
+                # Periodic redraw for clock / queue depth changes
+                _draw(stdscr)
+
+    curses.wrapper(_tui_main)
+
+
 def init():
     global reader, logger
 
@@ -299,24 +492,44 @@ def main():
         t = threading.Thread(target=worker_thread_fn, name=f"worker-{i}", daemon=True)
         t.start()
 
-    logger.info("Waiting for RFID...")
+    event_queue: "queue.Queue[tuple]" = queue.Queue()
+    reader_thread = threading.Thread(
+        target=rfid_reader_thread_fn,
+        args=(event_queue,),
+        name="rfid-reader",
+        daemon=True,
+    )
+    reader_thread.start()
+
+    # Switch from console logs to a TUI after initialization.
+    disable_console_logging(logger)
+    logger.info("TUI mode enabled (console logging disabled).")
+
     try:
-        while True:
-            rfid_tag, _text = reader.read()
-            timestamp = datetime.now()
-            logger.debug(f"RFID read: {rfid_tag}")
-
-            image_path = capture_image(str(rfid_tag), timestamp)
-            if image_path is None:
-                logger.warning(f"Image capture failed for RFID {rfid_tag}, skipping.")
-                continue
-
-            task = ScanTask(rfid_tag=str(rfid_tag), image_path=image_path, timestamp=timestamp)
-            scan_queue.put(task)
-            logger.info(f"Task queued. Queue depth: {scan_queue.qsize()}")
-
-            time.sleep(0.5)
-
+        try:
+            run_tui(event_queue)
+        except Exception as e:
+            # If curses fails (e.g., non-interactive environment), fall back to logs.
+            logger.error(f"TUI failed to start; falling back to console logging. Error: {e}", exc_info=True)
+            # Re-enable console handler by re-running setup if needed
+            # (simplest: add a new console StreamHandler).
+            formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+            console_handler = logging.StreamHandler()
+            console_handler.setFormatter(formatter)
+            logger.addHandler(console_handler)
+            logger.info("Waiting for RFID (no TUI)...")
+            while True:
+                rfid_tag, _text = reader.read()
+                timestamp = datetime.now()
+                logger.debug(f"RFID read: {rfid_tag}")
+                image_path = capture_image(str(rfid_tag), timestamp)
+                if image_path is None:
+                    logger.warning(f"Image capture failed for RFID {rfid_tag}, skipping.")
+                    continue
+                task = ScanTask(rfid_tag=str(rfid_tag), image_path=image_path, timestamp=timestamp)
+                scan_queue.put(task)
+                logger.info(f"Task queued. Queue depth: {scan_queue.qsize()}")
+                time.sleep(0.5)
     except KeyboardInterrupt:
         logger.info("Program interrupted by user.")
     except Exception as e:
