@@ -198,7 +198,7 @@ def process_task(task: ScanTask):
         logger.warning("No student_id resolved; skipping server POST.")
         save_offline_record(record)
     else:
-        ok = api_client.post_attendance_face_verify(**record)
+        ok = api_client.post_attendance_face_verify(**record, image_path=task.image_path)
         if not ok:
             save_offline_record(record)
         else:

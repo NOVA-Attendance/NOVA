@@ -13,6 +13,7 @@ from typing import Optional
 from urllib.parse import quote
 
 import requests
+import base64
 
 SERVER_URL = "http://192.168.0.100:5001"
 REQUEST_TIMEOUT = 5
@@ -89,6 +90,7 @@ def post_attendance_face_verify(
     confidence: float,
     matched: bool,
     timestamp: Optional[datetime] = None,
+    image_path=None,
 ) -> bool:
     """POST /attendance/face-verify — log RFID + face verification outcome."""
 
@@ -110,6 +112,12 @@ def post_attendance_face_verify(
         "matched": matched,
         "timestamp": ts.isoformat(),
     }
+    if image_path:
+        try:
+            raw = open(str(image_path), "rb").read()
+            payload["image_base64"] = base64.b64encode(raw).decode("ascii")
+        except Exception as e:
+            logger.warning("Could not attach image for face-verify POST: %s", e)
     resp = _post("/attendance/face-verify", payload)
     if resp is None:
         return False
