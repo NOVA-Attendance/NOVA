@@ -237,44 +237,25 @@ def rfid_reader_thread_fn(event_queue: "queue.Queue[tuple]"):
     """Blocking RFID read loop that emits UI events and enqueues scan tasks."""
     import contextlib
     import io
-    import os
 
     @contextlib.contextmanager
     def _suppress_terminal_output():
         """
-        Suppress both Python-level stdout/stderr and OS-level fd(1/2) output.
-        Some RFID libraries write AUTH ERROR directly to the terminal, which
-        will corrupt curses.
+        Suppress Python-level stdout/stderr during RFID reads.
+
+        NOTE: We intentionally do NOT redirect OS-level fd(1/2) here because
+        it affects the entire process and can break curses redraws (causing a
+        blank screen / stuck UI while reader.read() blocks).
+
+        We instead rely on the TUI doing a full-screen redraw every refresh to
+        overwrite any stray "AUTH ERROR!" lines that leak to the terminal.
         """
         buf = io.StringIO()
-        devnull_fd = None
-        saved_out = None
-        saved_err = None
         try:
             with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-                devnull_fd = os.open(os.devnull, os.O_WRONLY)
-                saved_out = os.dup(1)
-                saved_err = os.dup(2)
-                os.dup2(devnull_fd, 1)
-                os.dup2(devnull_fd, 2)
                 yield buf
         finally:
-            try:
-                if saved_out is not None:
-                    os.dup2(saved_out, 1)
-            except Exception:
-                pass
-            try:
-                if saved_err is not None:
-                    os.dup2(saved_err, 2)
-            except Exception:
-                pass
-            for fd in (saved_out, saved_err, devnull_fd):
-                try:
-                    if fd is not None:
-                        os.close(fd)
-                except Exception:
-                    pass
+            pass
 
     logger.info("RFID reader thread started.")
     while not shutdown_event.is_set():
@@ -393,17 +374,6 @@ def run_tui(event_queue: "queue.Queue[tuple]"):
         stdscr.nodelay(True)
         stdscr.timeout(200)
 
-        # Start RFID reading only after curses has initialized the terminal.
-        # This avoids interactions where RFID libs (or our suppression) touch
-        # stdout/stderr during curses startup.
-        reader_thread = threading.Thread(
-            target=rfid_reader_thread_fn,
-            args=(event_queue,),
-            name="rfid-reader",
-            daemon=True,
-        )
-        reader_thread.start()
-
         if curses.has_colors():
             curses.start_color()
             try:
@@ -421,6 +391,16 @@ def run_tui(event_queue: "queue.Queue[tuple]"):
         state["offline"] = offline_mode.is_set()
         state["queue_depth"] = scan_queue.qsize()
         _draw(stdscr)
+
+        # Start RFID reading only after the first successful draw so the user
+        # immediately sees the "waiting" screen.
+        reader_thread = threading.Thread(
+            target=rfid_reader_thread_fn,
+            args=(event_queue,),
+            name="rfid-reader",
+            daemon=True,
+        )
+        reader_thread.start()
 
         last_ready_at = time.monotonic()
         while not shutdown_event.is_set():
