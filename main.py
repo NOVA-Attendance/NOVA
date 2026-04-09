@@ -22,6 +22,8 @@ import subprocess
 import sys
 import threading
 import time
+import contextlib
+import io
 from collections import namedtuple
 from datetime import datetime
 from pathlib import Path
@@ -236,7 +238,16 @@ def rfid_reader_thread_fn(event_queue: "queue.Queue[tuple]"):
     logger.info("RFID reader thread started.")
     while not shutdown_event.is_set():
         try:
-            rfid_tag, _text = reader.read()
+            # Some RFID libs print auth errors (e.g. "AUTH ERROR") directly to stdout/stderr,
+            # which will corrupt a curses TUI. Capture and discard that output.
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                rfid_tag, _text = reader.read()
+            noise = buf.getvalue().strip()
+            if noise:
+                # Hide all library output from the user; log to file for debugging.
+                logger.debug(f"RFID library output suppressed: {noise!r}")
+
             timestamp = datetime.now()
             event_queue.put(("rfid_read", str(rfid_tag), timestamp))
 
@@ -392,6 +403,7 @@ def run_tui(event_queue: "queue.Queue[tuple]"):
                     state["status"] = "RFID reader error."
                     state["detail"] = msg
                     last_ready_at = time.monotonic()
+                # NOTE: we intentionally do not surface RFID library stdout/stderr in the TUI.
 
                 event_queue.task_done()
 
