@@ -21,6 +21,19 @@ import cv2
 import numpy as np
 from deepface import DeepFace
 
+# Enable GPU if available
+try:
+    import tensorflow as tf
+    gpus = tf.config.list_physical_devices('GPU')
+    if gpus:
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+        print(f"GPU detected: {len(gpus)} device(s) available")
+    else:
+        print("Running on CPU (no GPU detected)")
+except Exception:
+    print("Running on CPU")
+
 
 def hash_embedding(embedding: list[float], length: int = 16) -> str:
     """Turn an embedding into a short, stable text identifier."""
@@ -221,6 +234,19 @@ def main() -> None:
     cap.set(cv2.CAP_PROP_FPS, 30)            # Standard FPS for smooth video
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)      # Reduce latency on all platforms
 
+    # Warm up camera - read a few frames to initialize (fixes Mac camera issues)
+    print("Initializing camera...")
+    ret = False
+    for _ in range(10):
+        ret, _ = cap.read()
+        if ret:
+            break
+        time.sleep(0.1)
+    
+    if not ret:
+        cap.release()
+        raise SystemExit("Error: Camera opened but failed to read frames. Check camera permissions or try a different camera index (--camera 1).")
+
     last_id = ""
     last_error = ""
     frame_count = 0
@@ -256,20 +282,22 @@ def main() -> None:
         print(f"Enrollment mode: Will save faces for student ID: {args.student_id}")
 
     while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
+        try:
+            ret, frame = cap.read()
+            if not ret:
+                print("Error: Failed to read frame from camera")
+                break
 
-        frame_count += 1
-        now = time.time()
-        dt = now - fps_last_time
-        if dt >= 0.5:
-            fps = (1.0 / dt)
-            fps_last_time = now
+            frame_count += 1
+            now = time.time()
+            dt = now - fps_last_time
+            if dt >= 0.5:
+                fps = (1.0 / dt)
+                fps_last_time = now
 
-        # Process face detection every N frames
-        if frame_count % max(args.interval, 1) == 0:
-            embedding, err = try_compute_embedding(frame, args.model)
+            # Process face detection every N frames
+            if frame_count % max(args.interval, 1) == 0:
+                embedding, err = try_compute_embedding(frame, args.model)
             if embedding is not None:
                 last_id = hash_embedding([float(x) for x in embedding])
                 last_error = ""
@@ -294,83 +322,95 @@ def main() -> None:
                 last_error = err or "embedding failed"
                 face_detected = False
 
-        # Overlay info with better visual feedback
-        overlay_lines = [
-            f"Model: {args.model}",
-            f"FPS: {fps:.1f}",
-            f"Facial ID: {last_id or 'N/A'}",
-        ]
-        
-        if face_detected:
-            if args.recognize_live and database_embeddings is not None:
-                if recognized:
-                    overlay_lines.append(f"✓ Recognized in system ({recognized_conf:.2f})")
-                    if recognized_label:
-                        overlay_lines.append(f"Label: {recognized_label}")
+            # Overlay info with better visual feedback
+            overlay_lines = [
+                f"Model: {args.model}",
+                f"FPS: {fps:.1f}",
+                f"Facial ID: {last_id or 'N/A'}",
+            ]
+            
+            if face_detected:
+                if args.recognize_live and database_embeddings is not None:
+                    if recognized:
+                        overlay_lines.append(f"✓ Recognized in system ({recognized_conf:.2f})")
+                        if recognized_label:
+                            overlay_lines.append(f"Label: {recognized_label}")
+                    else:
+                        overlay_lines.append("Face detected (unknown)")
                 else:
-                    overlay_lines.append("Face detected (unknown)")
+                    overlay_lines.append("✓ Face Detected")
             else:
-                overlay_lines.append("✓ Face Detected")
-        else:
-            overlay_lines.append("✗ No Face")
-            
-        if last_error:
-            overlay_lines.append(f"Error: {last_error[:50]}")
-            
-        if args.enroll:
-            overlay_lines.append(f"Enrollment: {args.student_id}")
-            if face_saved:
-                overlay_lines.append("✓ Face Saved!")
+                overlay_lines.append("✗ No Face")
+                
+            if last_error:
+                overlay_lines.append(f"Error: {last_error[:50]}")
+                
+            if args.enroll:
+                overlay_lines.append(f"Enrollment: {args.student_id}")
+                if face_saved:
+                    overlay_lines.append("✓ Face Saved!")
 
-        # Draw overlay with better visibility
-        y = 30
-        for i, line in enumerate(overlay_lines):
-            color = (0, 255, 0) if "✓" in line else (0, 255, 255) if "✗" in line else (255, 255, 255)
-            thickness = 2 if "✓" in line or "✗" in line else 1
+            # Draw overlay with better visibility
+            y = 30
+            for i, line in enumerate(overlay_lines):
+                color = (0, 255, 0) if "✓" in line else (0, 255, 255) if "✗" in line else (255, 255, 255)
+                thickness = 2 if "✓" in line or "✗" in line else 1
+                cv2.putText(
+                    frame,
+                    line,
+                    (10, y),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7,
+                    color,
+                    thickness,
+                    cv2.LINE_AA,
+                )
+                y += 30
+
+            # Add instructions
             cv2.putText(
                 frame,
-                line,
-                (10, y),
+                "Press 'q' to quit, 's' to save face",
+                (10, frame.shape[0] - 20),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                color,
-                thickness,
+                0.5,
+                (255, 255, 255),
+                1,
                 cv2.LINE_AA,
             )
-            y += 30
 
-        # Add instructions
-        cv2.putText(
-            frame,
-            "Press 'q' to quit, 's' to save face",
-            (10, frame.shape[0] - 20),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            (255, 255, 255),
-            1,
-            cv2.LINE_AA,
-        )
-
-        cv2.imshow("NOVA - Facial User ID (press q to quit)", frame)
-        key = cv2.waitKey(1) & 0xFF
-        
-        if key == ord("q"):
-            break
-        elif key == ord("s") and args.enroll and face_detected and last_id:
-            # Save current face
-            if now - last_save_time > save_cooldown:
-                image_path, success = save_face_to_enrollment(frame, last_id, args.student_id)
-                if success:
-                    print(f"Face saved to: {image_path}")
-                    face_saved = True
-                    last_save_time = now
+            cv2.imshow("NOVA - Facial User ID (press q to quit)", frame)
+            key = cv2.waitKey(1) & 0xFF
+            
+            if key == ord("q"):
+                print("Quitting...")
+                break
+            elif key == ord("s") and args.enroll and face_detected and last_id:
+                # Save current face
+                if now - last_save_time > save_cooldown:
+                    image_path, success = save_face_to_enrollment(frame, last_id, args.student_id)
+                    if success:
+                        print(f"Face saved to: {image_path}")
+                        face_saved = True
+                        last_save_time = now
+                    else:
+                        print(f"Failed to save face: {image_path}")
                 else:
-                    print(f"Failed to save face: {image_path}")
-            else:
-                print("Please wait before saving another face...")
+                    print("Please wait before saving another face...")
+        
+        except KeyboardInterrupt:
+            print("\nInterrupted by user")
+            break
+        except Exception as e:
+            print(f"Error in main loop: {e}")
+            import traceback
+            traceback.print_exc()
+            # Continue running despite errors
+            continue
 
     cap.release()
     cv2.destroyAllWindows()
+    print("Camera closed")
 
 
 if __name__ == "__main__":
