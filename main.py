@@ -235,15 +235,54 @@ def worker_thread_fn():
 
 def rfid_reader_thread_fn(event_queue: "queue.Queue[tuple]"):
     """Blocking RFID read loop that emits UI events and enqueues scan tasks."""
+    import contextlib
+    import io
+    import os
+
+    @contextlib.contextmanager
+    def _suppress_terminal_output():
+        """
+        Suppress both Python-level stdout/stderr and OS-level fd(1/2) output.
+        Some RFID libraries write AUTH ERROR directly to the terminal, which
+        will corrupt curses.
+        """
+        buf = io.StringIO()
+        devnull_fd = None
+        saved_out = None
+        saved_err = None
+        try:
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                devnull_fd = os.open(os.devnull, os.O_WRONLY)
+                saved_out = os.dup(1)
+                saved_err = os.dup(2)
+                os.dup2(devnull_fd, 1)
+                os.dup2(devnull_fd, 2)
+                yield buf
+        finally:
+            try:
+                if saved_out is not None:
+                    os.dup2(saved_out, 1)
+            except Exception:
+                pass
+            try:
+                if saved_err is not None:
+                    os.dup2(saved_err, 2)
+            except Exception:
+                pass
+            for fd in (saved_out, saved_err, devnull_fd):
+                try:
+                    if fd is not None:
+                        os.close(fd)
+                except Exception:
+                    pass
+
     logger.info("RFID reader thread started.")
     while not shutdown_event.is_set():
         try:
-            # Some RFID libs print auth errors (e.g. "AUTH ERROR") directly to stdout/stderr,
-            # which will corrupt a curses TUI. Capture and discard that output.
-            buf = io.StringIO()
-            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            # Capture and discard any RFID library terminal output (AUTH ERROR, etc).
+            with _suppress_terminal_output() as buf:
                 rfid_tag, _text = reader.read()
-            noise = buf.getvalue().strip()
+            noise = (buf.getvalue() or "").strip()
             if noise:
                 # Hide all library output from the user; log to file for debugging.
                 logger.debug(f"RFID library output suppressed: {noise!r}")
@@ -273,7 +312,7 @@ def run_tui(event_queue: "queue.Queue[tuple]"):
     import curses
 
     state = {
-        "status": "Initializing…",
+        "status": "Initializing...",
         "detail": "",
         "last_rfid": None,
         "last_image": None,
@@ -282,6 +321,13 @@ def run_tui(event_queue: "queue.Queue[tuple]"):
         "offline": offline_mode.is_set(),
         "error": None,
     }
+
+    def _ascii(s: str) -> str:
+        # Enforce ASCII-only output to avoid mojibake on SSH terminals.
+        try:
+            return (s or "").encode("ascii", "replace").decode("ascii")
+        except Exception:
+            return ""
 
     def _safe_addstr(stdscr, y, x, s, attr=0):
         try:
@@ -293,7 +339,7 @@ def run_tui(event_queue: "queue.Queue[tuple]"):
                 x = 0
             if not s:
                 return
-            stdscr.addnstr(y, x, s, max(0, w - x - 1), attr)
+            stdscr.addnstr(y, x, _ascii(str(s)), max(0, w - x - 1), attr)
         except curses.error:
             pass
 
@@ -327,7 +373,7 @@ def run_tui(event_queue: "queue.Queue[tuple]"):
         _safe_addstr(stdscr, h - 1, 0, help_txt, curses.color_pair(1))
 
         if w < 50 or h < 10:
-            warn = "Terminal too small — enlarge for full UI"
+            warn = "Terminal too small - enlarge for full UI"
             _safe_addstr(stdscr, 1, 0, warn, curses.color_pair(3) | curses.A_BOLD)
 
         stdscr.refresh()
@@ -345,7 +391,7 @@ def run_tui(event_queue: "queue.Queue[tuple]"):
             curses.init_pair(3, curses.COLOR_RED, -1)     # error/offline
             curses.init_pair(4, curses.COLOR_CYAN, -1)    # info
 
-        state["status"] = "Waiting for RFID scan…"
+        state["status"] = "Waiting for RFID scan..."
         state["detail"] = "Tap your card on the reader."
         state["error"] = None
         state["offline"] = offline_mode.is_set()
@@ -374,7 +420,7 @@ def run_tui(event_queue: "queue.Queue[tuple]"):
                     state["last_image"] = None
                     state["error"] = None
                     state["status"] = "RFID scanned."
-                    state["detail"] = f"Capturing image for {tag}…"
+                    state["detail"] = f"Capturing image for {tag}..."
                     last_ready_at = time.monotonic()
                 elif kind == "image_captured":
                     _kind, tag, ts, img = ev
@@ -389,7 +435,7 @@ def run_tui(event_queue: "queue.Queue[tuple]"):
                     state["queue_depth"] = int(qd)
                     state["error"] = None
                     state["status"] = "Scan complete."
-                    state["detail"] = "Ready for next user…"
+                    state["detail"] = "Ready for next user..."
                     last_ready_at = time.monotonic()
                 elif kind == "capture_failed":
                     _kind, tag, ts = ev
@@ -409,7 +455,7 @@ def run_tui(event_queue: "queue.Queue[tuple]"):
 
             # Auto-return to "waiting" after a brief success window.
             if state["status"] in ("Scan complete.", "Image captured.", "RFID scanned.") and (time.monotonic() - last_ready_at) > 2.0:
-                state["status"] = "Waiting for RFID scan…"
+                state["status"] = "Waiting for RFID scan..."
                 state["detail"] = "Tap your card on the reader."
                 state["error"] = None
 
