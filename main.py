@@ -383,6 +383,17 @@ def run_tui(event_queue: "queue.Queue[tuple]"):
         stdscr.nodelay(True)
         stdscr.timeout(200)
 
+        # Start RFID reading only after curses has initialized the terminal.
+        # This avoids interactions where RFID libs (or our suppression) touch
+        # stdout/stderr during curses startup.
+        reader_thread = threading.Thread(
+            target=rfid_reader_thread_fn,
+            args=(event_queue,),
+            name="rfid-reader",
+            daemon=True,
+        )
+        reader_thread.start()
+
         if curses.has_colors():
             curses.start_color()
             curses.use_default_colors()
@@ -551,14 +562,6 @@ def main():
         t.start()
 
     event_queue: "queue.Queue[tuple]" = queue.Queue()
-    reader_thread = threading.Thread(
-        target=rfid_reader_thread_fn,
-        args=(event_queue,),
-        name="rfid-reader",
-        daemon=True,
-    )
-    reader_thread.start()
-
     # Switch from console logs to a TUI after initialization.
     disable_console_logging(logger)
     logger.info("TUI mode enabled (console logging disabled).")
