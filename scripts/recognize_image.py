@@ -13,6 +13,7 @@ Usage:
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import List, Dict, Tuple
 
@@ -24,18 +25,49 @@ import cv2
 def compute_embedding(image_path: Path, model_name: str) -> np.ndarray:
     """Compute a face embedding for one image using the selected model."""
     try:
-        # Universal optimization: opencv detector is fastest across all platforms
-        reps = DeepFace.represent(
-            img_path=str(image_path),
-            model_name=model_name,
-            detector_backend="opencv",  # 3-5x faster than retinaface on all devices
-            enforce_detection=True,
-        )
-        rep = reps[0] if isinstance(reps, list) and reps else reps
-        embedding = rep.get("embedding") if isinstance(rep, dict) else rep
-        if not embedding:
-            raise RuntimeError("No face detected in image")
-        return np.array(embedding, dtype=np.float32)
+        # Try several detectors. Jetson scans can be low-light or motion-blurred,
+        # and different backends succeed on different frames.
+        detectors = ("opencv", "mtcnn", "retinaface", "ssd")
+        last_err = None
+        emb = None
+
+        for backend in detectors:
+            try:
+                reps = DeepFace.represent(
+                    img_path=str(image_path),
+                    model_name=model_name,
+                    detector_backend=backend,
+                    enforce_detection=False,
+                )
+                rep = reps[0] if isinstance(reps, list) and reps else reps
+                embedding = rep.get("embedding") if isinstance(rep, dict) else rep
+                if embedding:
+                    emb = np.array(embedding, dtype=np.float32)
+                    break
+            except Exception as e:
+                last_err = e
+                continue
+
+        if emb is None or emb.size == 0:
+            raise RuntimeError(f"No face detected in image ({last_err})")
+
+        # Debug: optionally print the embedding vector for troubleshooting.
+        # Enable with:
+        #   export NOVA_DEBUG_EMBEDDING=1
+        #   (optional) export NOVA_DEBUG_EMBEDDING_FULL=1  # prints entire vector
+        if os.getenv("NOVA_DEBUG_EMBEDDING", "0") == "1":
+            full = os.getenv("NOVA_DEBUG_EMBEDDING_FULL", "0") == "1"
+            if full:
+                print(f"[DEBUG] embedding({model_name})={emb.tolist()}")
+            else:
+                head = emb[:10].tolist()
+                tail = emb[-10:].tolist() if emb.size > 10 else []
+                print(
+                    f"[DEBUG] embedding({model_name}) len={emb.size} "
+                    f"head10={head} tail10={tail}"
+                )
+
+        return emb
     except Exception as e:
         raise RuntimeError(f"Failed to compute embedding: {e}")
 
@@ -96,6 +128,54 @@ def find_best_match(query_embedding: np.ndarray, database_embeddings: np.ndarray
         "distance": best_distance,
         "confidence": max(0, 1 - best_distance) if metric == "cos" else max(0, 1 / (1 + best_distance))
     }
+
+
+def compare_against_embedding(
+    image_path: Path,
+    reference_embedding,
+    model_name: str = "Facenet512",
+    threshold: float = 0.4,
+    metric: str = "cos",
+) -> Dict:
+    """Compare a captured image against a single pre-fetched embedding from the server.
+
+    Skips loading the local face database entirely. Returns a dict with confidence,
+    distance, matched, and an error key if recognition fails.
+    """
+    base: Dict = {
+        "image_path": str(image_path),
+        "model":      model_name,
+        "metric":     metric,
+        "threshold":  threshold,
+    }
+    try:
+        ref = np.array(reference_embedding, dtype=np.float32)
+        if ref.ndim != 1 or ref.size == 0:
+            raise ValueError(f"Invalid reference embedding shape: {ref.shape}")
+
+        query = compute_embedding(image_path, model_name)
+
+        if metric == "cos":
+            distance   = cosine_distance(query, ref)
+            confidence = max(0.0, 1.0 - distance)
+        else:
+            distance   = l2_distance(query, ref)
+            confidence = max(0.0, 1.0 / (1.0 + distance))
+
+        return {
+            **base,
+            "distance":   round(distance, 6),
+            "confidence": round(confidence, 6),
+            "matched":    confidence >= threshold,
+        }
+    except Exception as exc:
+        return {
+            **base,
+            "distance":   1.0,
+            "confidence": 0.0,
+            "matched":    False,
+            "error":      str(exc),
+        }
 
 
 def recognize_single_image(image_path: Path, model_name: str, threshold: float = 0.4, 

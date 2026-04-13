@@ -2,9 +2,12 @@ deepface==0.0.95
 tf-keras==2.20.1
 opencv-python==4.8.1.78
 numpy==1.26.4
+requests>=2.31.0
+
+# Dev / testing
+pytest>=8.0.0
 
 # Optional platform-specific optimizations:
 # For Apple Silicon Macs (uncomment if needed):
 # tensorflow-macos==2.20.0
 # tensorflow-metal==1.1.0
-
